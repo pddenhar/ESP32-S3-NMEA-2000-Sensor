@@ -2,7 +2,7 @@
 #include "esp_log.h"
 #include "bsp/lvgl_port.h"
 #include "bsp/board.h"
-#include "widgets/lv_demo_widgets.h"
+#include "ui/ui_main.h"
 
 static const char *TAG = "main";
 
@@ -37,13 +37,13 @@ void app_main(void)
         }
 
 
-    ESP_LOGI(TAG, "Displaying LVGL widgets");
+    ESP_LOGI(TAG, "Building application UI");
 
     if (lvgl_port_lock(-1)) {
-        lv_demo_widgets();
+        ui_main_create();
         lvgl_port_unlock();
     } else {
-        ESP_LOGE(TAG, "Failed to acquire LVGL lock, widgets skipped");
+        ESP_LOGE(TAG, "Failed to acquire LVGL lock, UI not created");
     }
 
     ESP_LOGI(TAG, "UI tasks running via background worker task. Deleting main task.");
