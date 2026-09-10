@@ -63,6 +63,13 @@ CONFIG_LVGL_PORT_BUF_HEIGHT=40
 # Compiler Optimization (Perf -O2)
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
+# Console on the native USB Serial/JTAG peripheral (GPIO19/20), NOT UART0.
+# UART0's pins are GPIO43/44, which carry the RS485 port used as the rudder
+# sensor capture input -- leaving the console there would drive GPIO43 with log
+# output and fight the RS485 transceiver's receiver.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
 # Additional Fonts
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_16=y

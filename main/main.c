@@ -3,6 +3,7 @@
 #include "bsp/lvgl_port.h"
 #include "bsp/board.h"
 #include "ui/ui_main.h"
+#include "sensors/rudder_sensor.h"
 
 static const char *TAG = "main";
 
@@ -36,6 +37,15 @@ void app_main(void)
             // Proceed anyway as the display/touch driver is still running
         }
 
+
+    /* Start the rudder feedback capture before the UI so the first poll has a
+     * chance of finding a reading. A failure here is not fatal: the gauge shows
+     * its no-data state and the rest of the panel stays usable. */
+    rudder_sensor_config_t rudder_cfg = RUDDER_SENSOR_DEFAULT_CONFIG();
+    ret = rudder_sensor_init(&rudder_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Rudder sensor init failed: %s", esp_err_to_name(ret));
+    }
 
     ESP_LOGI(TAG, "Building application UI");
 

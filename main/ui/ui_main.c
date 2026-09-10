@@ -1,8 +1,16 @@
 #include "ui_main.h"
 #include "ui_rudder_gauge.h"
+#include "rudder_sensor.h"
 
-/* Set to 0 once real sensor data drives the UI. */
-#define UI_DEMO_ANIMATION 1
+#include <math.h>
+
+/* Set to 1 to sweep the needle from a canned animation instead of the sensor,
+ * for checking the layout without the rudder feedback unit connected. */
+#define UI_DEMO_ANIMATION 0
+
+/* Display refresh rate for the rudder reading. The driver measures at ~100 Hz;
+ * there is nothing to gain from redrawing faster than the eye resolves. */
+#define UI_RUDDER_POLL_MS 100
 
 #define SCREEN_BG   lv_color_hex(0x11141A)
 #define HEADER_BG   lv_color_hex(0x1B1F25)
@@ -26,6 +34,19 @@ static void demo_timer_cb(lv_timer_t *timer)
         step = -step;
     }
     ui_rudder_gauge_set_value(&s_rudder, angle);
+}
+#else
+/* Runs in the LVGL task, which already holds the lock. */
+static void rudder_poll_cb(lv_timer_t *timer)
+{
+    LV_UNUSED(timer);
+
+    rudder_sensor_reading_t reading;
+    if (rudder_sensor_read(&reading) == ESP_OK && reading.valid) {
+        ui_rudder_gauge_set_value(&s_rudder, (int32_t)lroundf(reading.angle_deg));
+    } else {
+        ui_rudder_gauge_set_no_data(&s_rudder);
+    }
 }
 #endif
 
@@ -69,6 +90,9 @@ void ui_main_create(void)
 
 #if UI_DEMO_ANIMATION
     lv_timer_create(demo_timer_cb, 40, NULL);
+#else
+    ui_rudder_gauge_set_no_data(&s_rudder);
+    lv_timer_create(rudder_poll_cb, UI_RUDDER_POLL_MS, NULL);
 #endif
 }
 
