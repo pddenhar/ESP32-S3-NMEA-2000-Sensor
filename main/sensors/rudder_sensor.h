@@ -43,11 +43,13 @@ typedef struct {
     int gpio_num;
 
     /**
-     * Held high so an auto-direction RS485 transceiver keeps its driver off.
+     * Pulled high so an auto-direction RS485 transceiver keeps its driver off.
      *
      * If the transceiver's DI line is allowed to float or glitch low, the
-     * driver turns on and fights the signal being injected onto A/B. Set to -1
-     * when the capture pin is not behind an RS485 transceiver.
+     * driver turns on and fights the signal being injected onto A/B. The pin is
+     * pulled, not driven, so that it stays safe if it turns out to be the
+     * transceiver's RO output rather than DI. Set to -1 when the capture pin is
+     * not behind an RS485 transceiver.
      */
     int rs485_tx_idle_gpio;
 

@@ -1,65 +1,28 @@
-# Waveshare ESP32-S3 Touch LCD 4.3 - LVGL Widgets Example
+# Waveshare ESP32-S3 Touch LCD 4.3 - Rudder Sensor to NMEA 2000
 
-This example demonstrates how to compile and run the official LVGL Widgets demo on the Waveshare ESP32-S3 Touch LCD 4.3 board.
+This project measures input from a sensor and outputs it on the screen using LVGL. It also outputs the sensor value over the NMEA 2000 bus. 
 
-It showcases the decoupled board drivers (`bsp/board.h`) initializing the display and touch controllers separately and feeding them into the LVGL port wrapper (`bsp/lvgl_port.h`).
+---
+
+## Rudder Sensor Wiring (Simrad RF300)
+
+**Chain:** RF300 → sense resistor → RS485 screw terminal → GPIO43 → gauge.
+
+**Sensor:** 3400 Hz = amidships. 20 Hz = 1°. So ±45° = 2500–4300 Hz.
+
+**Why RS485:** the LCD eats every free pin. The RS485 receiver is *already* a
+comparator with hysteresis (±200 mV, differential), on an accessible terminal.
+No comparator chip needed.
+
+If the sensor Rsense is connected to A, bias B to half of the voltage swing range of A using a resistor divider. This will provide it with the best noise immunity and the clearest signal. 
 
 ---
 
 ## References
 
 * **Official Wiki:** [Waveshare ESP32-S3-Touch-LCD-4.3 Wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4.3)
-* **Original Demo Code:** This example and driver are based on the official demo code found in the [Waveshare ESP32-S3-Touch-LCD-4.3 Demo ZIP](https://files.waveshare.com/wiki/ESP32-S3-Touch-LCD-4.3/ESP32-S3-Touch-LCD-4.3-Demo.zip)
 
----
 
-## Requirements
-
-* **Target Hardware:** Waveshare ESP32-S3-Touch-LCD-4.3 (A) board.
-* **ESP-IDF Version:** v5.3 or higher.
-* **LVGL Version:** Works with **LVGL v8 (>=8.3.11)** or **LVGL v9 (>=9.0.0)**.
-
-## Switching Between LVGL v8 and v9
-
-The example dynamically compiles against either version based on the dependency defined in `main/idf_component.yml`.     
-
-To switch between versions:
-1. Open `main/idf_component.yml` and adjust the `lvgl` version rule (e.g., `^8.3.11` or `^9.0.0`).
-2. Run `idf.py reconfigure` to update components.
-3. Clean the configuration and rebuild:
-   ```bash
-   rm -f sdkconfig
-   rm -rf build
-   idf.py build
-   ```
-
-## Building and Flashing
-
-Before building or setting the target, set up your ESP-IDF environment in your active terminal by sourcing the export script:
-
-```bash
-# Replace ~/esp/esp-idf with the path to your actual ESP-IDF installation directory
-. ~/esp/esp-idf/export.sh
-```
-
-Because this project uses board-specific RGB display timings and Octal PSRAM configurations, the build target is locked to the `esp32s3`.
-
-1. Set the build target:
-   ```bash
-   idf.py set-target esp32s3
-   ```
-
-2. Build the project:
-   ```bash
-   idf.py build
-   ```
-
-3. Flash the executable and open the serial monitor:
-   ```bash
-   idf.py flash monitor
-   ```
-
----
 
 ## Performance Tuning
 
