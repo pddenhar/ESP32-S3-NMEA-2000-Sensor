@@ -5,9 +5,11 @@
 #endif
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
-#include "driver/twai.h"
+#include "esp_twai.h"
+#include "esp_twai_onchip.h"
 #include "NMEA2000.h"
 
 class tNMEA2000_esp32 : public tNMEA2000 {
@@ -22,6 +24,11 @@ public:
         CAN_SPEED_1000KBPS = 1000
     };
 
+    /**
+     * @param twai_controller_id  Accepted for source compatibility with the
+     *        legacy-driver version of this class, but unused: the esp_twai
+     *        driver allocates a free controller itself.
+     */
     tNMEA2000_esp32(gpio_num_t _TxPin, gpio_num_t _RxPin, int twai_controller_id = 0,
                     CAN_speed_t = CAN_speed_t::CAN_SPEED_250KBPS);
 
@@ -47,10 +54,44 @@ private:
 
     void handleBusError();
 
-    twai_timing_config_t t_config_;
-    twai_filter_config_t f_config_;
-    twai_general_config_t g_config_;
-    twai_handle_t twai_handle_ = nullptr;
+    /* The esp_twai driver requires its event callbacks to live in IRAM and
+     * rejects registration otherwise, so these carry IRAM_ATTR in the .cpp.
+     * They run in ISR context: no logging, no blocking calls. */
+    static bool onRxDone(twai_node_handle_t handle, const twai_rx_done_event_data_t *edata, void *user_ctx);
+    static bool onTxDone(twai_node_handle_t handle, const twai_tx_done_event_data_t *edata, void *user_ctx);
+    static bool onStateChange(twai_node_handle_t handle, const twai_state_change_event_data_t *edata, void *user_ctx);
+
+    /* The new driver has no blocking receive: frames arrive in an ISR callback
+     * only. They are copied into this queue so CANGetFrame() keeps its polling
+     * contract with the NMEA2000 library. */
+    struct RxItem {
+        uint32_t id;
+        uint8_t len;
+        uint8_t data[8];
+    };
+
+    /* twai_node_transmit() queues the *pointer* to a twai_frame_t rather than
+     * copying it, so a frame built on the stack would dangle while queued.
+     * Each in-flight frame therefore owns a slot here until on_tx_done reports
+     * it sent. Slots are not reclaimed on bus-off: the driver re-runs queued
+     * transmissions once the node returns to error-active. */
+    struct TxSlot {
+        twai_frame_t frame;
+        uint8_t data[8];
+        bool in_use;
+    };
+    static constexpr size_t kTxSlotCount = 16;
+
+    twai_onchip_node_config_t node_config_;
+    twai_node_handle_t node_;
+    QueueHandle_t rx_queue_;
+    uint16_t rx_queue_depth_;
+    uint8_t rx_scratch_[8];
+
+    TxSlot tx_slots_[kTxSlotCount];
+    size_t tx_next_slot_;
+    portMUX_TYPE tx_lock_;
+
     bool is_open_;
     TaskHandle_t error_monitor_task_handle_;
     volatile bool should_stop_error_monitor_;
@@ -58,12 +99,15 @@ private:
     // the task to exit on its own instead of force-deleting it (which could
     // kill it while it holds can_mutex_ and deadlock CAN_deinit).
     volatile bool error_monitor_running_;
+    // Set and cleared from the state-change ISR callback.
+    volatile bool bus_off_;
+    bool recover_requested_;
 
-    // Serializes access to the TWAI handle so the error-monitor task cannot
-    // uninstall the driver while another task is transmitting or receiving.
+    // Serializes access to the node handle so the error-monitor task cannot
+    // tear the driver down while another task is transmitting or receiving.
     SemaphoreHandle_t can_mutex_;
-    // "Report once" flags, re-armed only on genuine recovery (a received
-    // frame), to keep a missing/faulty bus from flooding the log.
+    // "Report once" flags, re-armed only on genuine recovery, to keep a
+    // missing/faulty bus from flooding the log.
     bool not_open_reported_;
     bool busoff_reported_;
 };
