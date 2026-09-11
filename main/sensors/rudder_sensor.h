@@ -64,7 +64,7 @@ typedef struct {
      */
     uint32_t prescale;
 
-    float center_hz;     /* Frequency at amidships, 3400.0 for the RF300
+    float center_hz;     /* Frequency at amidships, 3400.0 for the RF300 */
     float hz_per_deg;    /* Frequency change per degree, 20.0 for the RF300 */
     float max_angle_deg; /* Mechanical full-scale; sets the plausible frequency band */
 

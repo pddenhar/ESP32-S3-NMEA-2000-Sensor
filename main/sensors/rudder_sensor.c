@@ -1,10 +1,12 @@
 #include "rudder_sensor.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "esp_heap_caps.h"
 #include "driver/mcpwm_cap.h"
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -27,6 +29,15 @@ static const char *TAG = "rudder";
  * means the signal dropped out, so the window in progress is abandoned. */
 #define RUDDER_GAP_FACTOR 4
 
+/* Reader retries when the ISR publishes mid-copy. */
+#define RUDDER_READ_MAX_TRIES 8
+
+typedef struct {
+    uint32_t periods;
+    uint32_t span_ticks;
+    int64_t time_us;
+} rudder_sample_t;
+
 typedef struct {
     mcpwm_cap_timer_handle_t cap_timer;
     mcpwm_cap_channel_handle_t cap_chan;
@@ -44,14 +55,11 @@ typedef struct {
     uint32_t win_count;   /* Capture intervals accumulated since win_first */
     bool win_open;
 
-    /* Last completed window, shared with readers.
-     *
-     * Published as integers: the Xtensa FPU is not saved across interrupts, so
-     * the ISR must not touch float. Readers do the division. */
-    portMUX_TYPE lock;
-    uint32_t pub_periods;    /* Input periods spanned */
-    uint32_t pub_span_ticks; /* Capture ticks they took */
-    int64_t pub_time_us;     /* 0 until the first window completes */
+    /* Last completed window. Integers only: the Xtensa FPU is not saved across
+     * interrupts, so readers do the division. The ISR fills the idle slot then
+     * bumps pub_gen; a reader retries if it moved while copying. */
+    rudder_sample_t pub_slot[2];
+    _Atomic uint32_t pub_gen;
 } rudder_ctx_t;
 
 static rudder_ctx_t *s_ctx;
@@ -89,11 +97,12 @@ static bool IRAM_ATTR rudder_capture_cb(mcpwm_cap_channel_handle_t chan,
 
     const uint32_t span = ts - ctx->win_first;
     if (span >= ctx->window_ticks) {
-        portENTER_CRITICAL_ISR(&ctx->lock);
-        ctx->pub_periods = ctx->win_count * ctx->cfg.prescale;
-        ctx->pub_span_ticks = span;
-        ctx->pub_time_us = esp_timer_get_time();
-        portEXIT_CRITICAL_ISR(&ctx->lock);
+        uint32_t next_gen = atomic_load_explicit(&ctx->pub_gen, memory_order_relaxed) + 1;
+        rudder_sample_t *slot = &ctx->pub_slot[next_gen & 1u];
+        slot->periods = ctx->win_count * ctx->cfg.prescale;
+        slot->span_ticks = span;
+        slot->time_us = esp_timer_get_time();
+        atomic_store_explicit(&ctx->pub_gen, next_gen, memory_order_release);
 
         /* Reopen on this edge so no input periods are dropped between windows. */
         ctx->win_first = ts;
@@ -121,7 +130,10 @@ esp_err_t rudder_sensor_init(const rudder_sensor_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    rudder_ctx_t *ctx = calloc(1, sizeof(rudder_ctx_t));
+    /* Internal DRAM: the capture ISR touches this, and plain calloc() falls
+     * back to PSRAM when internal memory is tight. */
+    rudder_ctx_t *ctx = heap_caps_calloc(1, sizeof(rudder_ctx_t),
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (ctx == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -129,7 +141,6 @@ esp_err_t rudder_sensor_init(const rudder_sensor_config_t *config)
     if (ctx->cfg.prescale == 0) {
         ctx->cfg.prescale = 1;
     }
-    ctx->lock = (portMUX_TYPE)portMUX_INITIALIZER_UNLOCKED;
 
     esp_err_t ret = ESP_OK;
 
@@ -249,26 +260,31 @@ esp_err_t rudder_sensor_read(rudder_sensor_reading_t *out)
         return ESP_ERR_INVALID_STATE;
     }
 
-    uint32_t periods;
-    uint32_t span_ticks;
-    int64_t time_us;
-    portENTER_CRITICAL(&ctx->lock);
-    periods = ctx->pub_periods;
-    span_ticks = ctx->pub_span_ticks;
-    time_us = ctx->pub_time_us;
-    portEXIT_CRITICAL(&ctx->lock);
+    rudder_sample_t sample;
+    uint32_t gen, gen_after;
+    int tries = 0;
+    do {
+        if (++tries > RUDDER_READ_MAX_TRIES) {
+            memset(out, 0, sizeof(*out));
+            return ESP_OK;
+        }
+        gen = atomic_load_explicit(&ctx->pub_gen, memory_order_acquire);
+        sample = ctx->pub_slot[gen & 1u];
+        atomic_thread_fence(memory_order_acquire);
+        gen_after = atomic_load_explicit(&ctx->pub_gen, memory_order_relaxed);
+    } while (gen != gen_after);
 
     memset(out, 0, sizeof(*out));
-    out->timestamp_us = time_us;
+    out->timestamp_us = sample.time_us;
 
-    if (time_us == 0 || span_ticks == 0) {
+    if (sample.time_us == 0 || sample.span_ticks == 0) {
         return ESP_OK; /* Nothing captured yet */
     }
 
-    const float freq = (float)periods * (float)ctx->resolution_hz / (float)span_ticks;
+    const float freq = (float)sample.periods * (float)ctx->resolution_hz / (float)sample.span_ticks;
     out->frequency_hz = freq;
 
-    if (esp_timer_get_time() - time_us > (int64_t)ctx->cfg.timeout_ms * 1000) {
+    if (esp_timer_get_time() - sample.time_us > (int64_t)ctx->cfg.timeout_ms * 1000) {
         return ESP_OK; /* Signal stopped; report no-data rather than a stale angle */
     }
     if (freq < ctx->min_hz || freq > ctx->max_hz) {
