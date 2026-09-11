@@ -70,6 +70,11 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
+# Keep the TWAI (CAN) ISR in IRAM so NMEA 2000 timing does not depend on flash
+# cache hits. NMEA2000_twai also raises #warning without it, which is fatal
+# under IDF's -Werror.
+CONFIG_TWAI_ISR_IN_IRAM=y
+
 # Additional Fonts
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_16=y

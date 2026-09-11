@@ -4,6 +4,7 @@
 #include "bsp/board.h"
 #include "ui/ui_main.h"
 #include "sensors/rudder_sensor.h"
+#include "n2k/n2k_bridge.h"
 
 static const char *TAG = "main";
 
@@ -45,6 +46,13 @@ void app_main(void)
     ret = rudder_sensor_init(&rudder_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Rudder sensor init failed: %s", esp_err_to_name(ret));
+    }
+
+    /* Start NMEA 2000 output once the sensor exists. Also non-fatal: without
+     * the bus the gauge still works, it just publishes nothing. */
+    ret = n2k_bridge_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "NMEA 2000 bridge start failed: %s", esp_err_to_name(ret));
     }
 
     ESP_LOGI(TAG, "Building application UI");

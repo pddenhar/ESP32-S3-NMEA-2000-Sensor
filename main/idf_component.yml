@@ -15,3 +15,14 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   bobscott45/waveshare_esp32_s3_touch_lcd_4_3: ^1.0.7
+
+  # NMEA 2000 core stack. Not on the ESP Component Registry, so it comes
+  # straight from git. The dependency key sets the component name, and it must
+  # be exactly `NMEA2000` for components/NMEA2000_twai's `REQUIRES NMEA2000`
+  # to resolve.
+  #
+  # The matching TWAI transport is vendored in components/NMEA2000_twai rather
+  # than fetched -- see the README there for why.
+  NMEA2000:
+    git: https://github.com/ttlappalainen/NMEA2000.git
+    version: master
