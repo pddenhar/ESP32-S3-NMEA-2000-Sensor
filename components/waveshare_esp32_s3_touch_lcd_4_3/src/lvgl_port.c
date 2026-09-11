@@ -23,6 +23,12 @@ IRAM_ATTR static bool rgb_lcd_on_vsync_event(esp_lcd_panel_handle_t panel, const
 }
 
 static const char *TAG = "lv_port";                      // Tag for logging
+
+/* Consecutive failed touch reads before the poll backs off. Small enough that a
+ * genuine fault is caught quickly, large enough that a stray glitch is absorbed
+ * without a 400 ms recovery stalling the UI. */
+#define TOUCH_FAILURES_BEFORE_BACKOFF 5
+#define TOUCH_RETRY_INTERVAL_US       (1000 * 1000)
 static SemaphoreHandle_t lvgl_mux;                       // LVGL mutex for synchronization
 static TaskHandle_t lvgl_task_handle = NULL;             // Handle for the LVGL task
 
@@ -572,25 +578,39 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 
     /* Read data from touch controller into memory.
      *
-     * A transfer can fail if the shared I2C bus wedges -- a glitch on SDA can
-     * leave a slave holding the line low, and the bus never returns to idle.
-     * The transfer is bounded (transaction_timeout_ms, set in board.c), so that
-     * now surfaces here as an error instead of spinning in the driver's
-     * bus-busy poll until the idle task starves and the WDT fires. Recover by
-     * resetting the bus and reporting "not touched"; the next poll retries. */
+     * A transfer can fail if the I2C bus wedges, or if the GT911 stops
+     * acknowledging altogether. The transfer is bounded (transaction_timeout_ms,
+     * set in board.c) so neither hangs the LVGL task any more, but LVGL polls
+     * the controller at the indev rate -- roughly 60 Hz, since PIN_NUM_TOUCH_INT
+     * is -1 and there is no interrupt to gate on -- and a failure that persists
+     * at that rate buries the log in driver-level errors we do not control.
+     *
+     * So back off instead: after a few consecutive failures, stop polling and
+     * retry once a second, attempting a hard recovery each time. */
     static uint32_t touch_read_failures;
+    static int64_t next_retry_us;
+
+    if (touch_read_failures >= TOUCH_FAILURES_BEFORE_BACKOFF) {
+        if (esp_timer_get_time() < next_retry_us) {
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+        next_retry_us = esp_timer_get_time() + TOUCH_RETRY_INTERVAL_US;
+        waveshare_esp32_s3_touch_recover();
+    }
+
     esp_err_t read_err = esp_lcd_touch_read_data(tp);
     if (read_err != ESP_OK) {
-        if (++touch_read_failures == 1 || touch_read_failures % 100 == 0) {
-            ESP_LOGW(TAG, "Touch read failed (%s), resetting I2C bus (%u in a row)",
-                     esp_err_to_name(read_err), (unsigned)touch_read_failures);
-        }
-        i2c_master_bus_handle_t bus = waveshare_esp32_s3_i2c_bus_handle();
-        if (bus != NULL) {
-            i2c_master_bus_reset(bus);
+        touch_read_failures++;
+        if (touch_read_failures == TOUCH_FAILURES_BEFORE_BACKOFF) {
+            ESP_LOGW(TAG, "Touch read failing (%s), backing off to one retry per %d ms",
+                     esp_err_to_name(read_err), (int)(TOUCH_RETRY_INTERVAL_US / 1000));
         }
         data->state = LV_INDEV_STATE_RELEASED;
         return;
+    }
+    if (touch_read_failures >= TOUCH_FAILURES_BEFORE_BACKOFF) {
+        ESP_LOGI(TAG, "Touch recovered after %u failed reads", (unsigned)touch_read_failures);
     }
     touch_read_failures = 0;
 

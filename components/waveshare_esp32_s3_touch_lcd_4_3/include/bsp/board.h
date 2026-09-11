@@ -76,6 +76,16 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lcd_panel_handle_t *ret_panel, esp
  */
 i2c_master_bus_handle_t waveshare_esp32_s3_i2c_bus_handle(void);
 
+/**
+ * @brief Recover the touch controller after repeated I2C failures.
+ *
+ * Resets the I2C master, logs which devices still acknowledge on the bus, then
+ * hard-resets the GT911 through the CH422G expander. Takes ~400 ms (the reset
+ * pulse has mandatory settling delays), so call it from a backoff path, not on
+ * every failed read.
+ */
+esp_err_t waveshare_esp32_s3_touch_recover(void);
+
 esp_err_t waveshare_rgb_lcd_bl_on();
 esp_err_t waveshare_rgb_lcd_bl_off();
 

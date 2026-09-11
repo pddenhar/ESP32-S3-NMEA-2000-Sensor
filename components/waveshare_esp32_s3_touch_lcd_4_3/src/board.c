@@ -106,6 +106,40 @@ static esp_err_t waveshare_esp32_s3_touch_reset()
     return ESP_OK;
 }
 
+esp_err_t waveshare_esp32_s3_touch_recover(void)
+{
+    if (i2c_bus_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Clear any half-finished transfer left in the master's state machine. This
+     * alone does nothing for a slave that has stopped responding -- the hard
+     * reset below is what recovers that case. */
+    i2c_master_bus_reset(i2c_bus_handle);
+
+    /* Report which devices actually acknowledge, so a persistent failure says
+     * what kind it is rather than just "I2C read error". The GT911 latches its
+     * address from the INT pin level at reset: 0x5D with INT low, 0x14 with it
+     * high. INT is not driven on this board (PIN_NUM_TOUCH_INT is -1), so if
+     * the controller resets itself it can come back at the other address and
+     * NACK every transfer to the one the driver was configured with. */
+    bool gt911_primary = (i2c_master_probe(i2c_bus_handle, 0x5D, 50) == ESP_OK);
+    bool gt911_backup  = (i2c_master_probe(i2c_bus_handle, 0x14, 50) == ESP_OK);
+    bool expander      = (i2c_master_probe(i2c_bus_handle, 0x24, 50) == ESP_OK);
+    ESP_LOGW(TAG, "I2C probe: GT911@0x5D %s, GT911@0x14 %s, CH422G@0x24 %s",
+             gt911_primary ? "ack" : "--", gt911_backup ? "ack" : "--",
+             expander ? "ack" : "--");
+
+    /* Needs the expander at 0x24/0x38, so it can only work if the bus itself is
+     * alive. Pulses the GT911's reset line; the controller re-latches its
+     * address and starts up clean. */
+    esp_err_t ret = waveshare_esp32_s3_touch_reset();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Touch hard reset failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
 #endif
 
 // Initialize RGB LCD
