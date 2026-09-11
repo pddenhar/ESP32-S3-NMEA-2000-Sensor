@@ -64,7 +64,7 @@ typedef struct {
      */
     uint32_t prescale;
 
-    float center_hz;     /* Frequency at amidships, 3400.0 for the RF300 */
+    float center_hz;     /* Frequency at amidships, 3400.0 for the RF300
     float hz_per_deg;    /* Frequency change per degree, 20.0 for the RF300 */
     float max_angle_deg; /* Mechanical full-scale; sets the plausible frequency band */
 
@@ -82,20 +82,22 @@ typedef struct {
     uint32_t timeout_ms;
 } rudder_sensor_config_t;
 
+#define RUDDER_SENSOR_CENTER_HZ 3400.0f /* Simrad RF300 */
+
 /** Defaults for an RF300 on the 4.3B's RS485 port. */
-#define RUDDER_SENSOR_DEFAULT_CONFIG()      \
-    (rudder_sensor_config_t)                \
-    {                                       \
-        .gpio_num = 43,                     \
-        .rs485_tx_idle_gpio = 44,           \
-        .mcpwm_group_id = 0,                \
-        .prescale = 1,                      \
-        .center_hz = 3400.0f,               \
-        .hz_per_deg = 20.0f,                \
-        .max_angle_deg = 45.0f,             \
-        .invert = false,                    \
-        .window_us = 10000,                 \
-        .timeout_ms = 250,                  \
+#define RUDDER_SENSOR_DEFAULT_CONFIG()          \
+    (rudder_sensor_config_t)                    \
+    {                                           \
+        .gpio_num = 43,                         \
+        .rs485_tx_idle_gpio = 44,               \
+        .mcpwm_group_id = 0,                    \
+        .prescale = 1,                          \
+        .center_hz = RUDDER_SENSOR_CENTER_HZ,   \
+        .hz_per_deg = 20.0f,                    \
+        .max_angle_deg = 90.0f,                 \
+        .invert = false,                        \
+        .window_us = 10000,                     \
+        .timeout_ms = 250,                      \
     }
 
 typedef struct {
