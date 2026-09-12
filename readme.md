@@ -27,6 +27,11 @@ originates on this device. The table lives in `main/n2k/n2k_channels.c`.
 
 **Out:** PGN 127245 (Rudder), 10 Hz, from the RF300 above.
 
+**In:** PGN 127488 (Engine Parameters, Rapid Update) for engine speed, shown on
+a tachometer. The dial is 0-6000 rpm with no redline: the range suits a variety
+of marine engines but a redline belongs to one particular engine, and a wrong
+one is worse than none. Set `RPM_WARN_ABOVE` in `ui_engine_gauges.c` to get one.
+
 **In:** PGN 127489 (Engine Parameters, Dynamic) feeds two channels, coolant
 temperature and oil pressure. One message can feed any number of channels --
 each reading the panel can draw is its own -- so a field that goes missing
@@ -35,9 +40,10 @@ single or port engine) is decoded: a twin-screw boat sends this PGN once per
 engine, often from the same ECU, so the source address does not separate them.
 See `N2K_ENGINE_INSTANCE` in `n2k_bridge.cpp`.
 
-Engine readouts are in °F and psi. Set `N2K_ENGINE_UNITS_US` to 0 in
-`n2k_channels.h` for °C and kPa; the units label, the dial range and the alarm
-points all follow from that one switch.
+Engine temperature and pressure are in °F and psi. Set `N2K_ENGINE_UNITS_US` to
+0 in `n2k_channels.h` for °C and kPa; the unit labels and conversions follow
+from that switch, and so do the dial ranges and alarm points in
+`ui_engine_gauges.c`. Only instance 0 is decoded for these too.
 
 **In:** PGN 127250 (Vessel Heading), shown on the heading gauge. The PGN carries
 a flag saying whether the heading is referenced to true or to magnetic north --
