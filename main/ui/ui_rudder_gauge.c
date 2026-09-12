@@ -217,9 +217,19 @@ void ui_rudder_gauge_set_no_data(ui_rudder_gauge_t *gauge)
  * for each one.
  * ------------------------------------------------------------------------- */
 
+/* LVGL sends LV_EVENT_DELETE to an object before it deletes that object's
+ * children, so the scale is still alive when this runs -- and it holds a
+ * pointer to tick_label_ptrs, which lives inside the block about to be freed.
+ * Drop the reference before freeing rather than leaving it dangling for the
+ * rest of the teardown. */
 static void gauge_free_cb(lv_event_t *e)
 {
-    lv_free(lv_event_get_user_data(e));
+    ui_rudder_gauge_t *gauge = lv_event_get_user_data(e);
+
+    if (gauge->scale != NULL) {
+        lv_scale_set_text_src(gauge->scale, NULL);
+    }
+    lv_free(gauge);
 }
 
 static lv_obj_t *gauge_create(lv_obj_t *parent, int32_t size, const char *title)

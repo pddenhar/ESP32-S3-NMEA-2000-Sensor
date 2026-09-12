@@ -209,6 +209,13 @@ bool tNMEA2000_esp32::CANOpen()
     }
 
     CAN_init();
+    if (!is_open_)
+    {
+        /* CAN_init() logs the specific failure. Reporting it here too is what
+         * keeps tNMEA2000::Open() -- and everything that trusts its return --
+         * from announcing a bus this node never joined. */
+        return false;
+    }
 
     if (error_monitor_task_handle_ == nullptr &&
         xTaskCreate(errorMonitorTask, "TWAI_errMonitor", TWAI_ERROR_MONITOR_STACK_SIZE, this, 5,

@@ -23,8 +23,15 @@
 #define I2C_MASTER_RX_BUF_DISABLE   0                          /*!< I2C master doesn't need buffer */
 #define I2C_MASTER_TIMEOUT_MS       1000
 
-#define GPIO_INPUT_IO_4    4
-#define GPIO_INPUT_PIN_SEL  1ULL<<GPIO_INPUT_IO_4
+/* GT911 interrupt line (CTP_IRQ on the schematic).
+ *
+ * Driven low only while the controller is held in reset, because the GT911
+ * latches its I2C address from this pin's level as reset is released: low
+ * selects 0x5D, high selects 0x14. It is released back to an input afterwards
+ * -- it is the controller's output the rest of the time, and holding it would
+ * put two drivers on the same net. */
+#define GPIO_TOUCH_INT      4
+#define GPIO_TOUCH_INT_SEL  (1ULL << GPIO_TOUCH_INT)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Please update the following configuration according to your LCD spec //////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -66,6 +73,16 @@
 #define PIN_NUM_TOUCH_INT       (-1)            // -1 if not used
 
 
+/**
+ * @brief Bring up the RGB panel and, if present, the GT911 touch controller.
+ *
+ * A panel with no working touch controller is still a usable panel, so a touch
+ * failure is reported in the log and leaves @p ret_touch NULL rather than
+ * failing the call; only a panel or I2C bus failure returns an error.
+ *
+ * @param[out] ret_panel  panel handle; never NULL on success
+ * @param[out] ret_touch  touch handle, or NULL if touch did not come up
+ */
 esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lcd_panel_handle_t *ret_panel, esp_lcd_touch_handle_t *ret_touch);
 
 /**
@@ -86,9 +103,7 @@ i2c_master_bus_handle_t waveshare_esp32_s3_i2c_bus_handle(void);
  */
 esp_err_t waveshare_esp32_s3_touch_recover(void);
 
-esp_err_t waveshare_rgb_lcd_bl_on();
-esp_err_t waveshare_rgb_lcd_bl_off();
-
-void example_lvgl_demo_ui();
+esp_err_t waveshare_rgb_lcd_bl_on(void);
+esp_err_t waveshare_rgb_lcd_bl_off(void);
 
 #endif

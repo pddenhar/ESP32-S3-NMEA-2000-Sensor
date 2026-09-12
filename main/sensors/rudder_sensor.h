@@ -125,6 +125,11 @@ esp_err_t rudder_sensor_init(const rudder_sensor_config_t *config);
  *
  * Returns ESP_OK with @p out->valid set false when there is no usable reading;
  * a missing sensor is a normal state, not an error.
+ *
+ * ESP_ERR_TIMEOUT means the capture ISR republished faster than the reader
+ * could copy a sample, repeatedly. That should not happen at the rate a window
+ * completes, so it points at a misconfigured prescale or a far noisier input
+ * than the sensor produces -- worth logging rather than treating as no-data.
  */
 esp_err_t rudder_sensor_read(rudder_sensor_reading_t *out);
 

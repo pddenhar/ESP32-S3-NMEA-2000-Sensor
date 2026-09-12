@@ -78,26 +78,10 @@ menu "Waveshare: ESP32 S3 Touch LCD 4.3 (A) Configuration"
             default 2 if LVGL_PORT_AVOID_TEAR_MODE_2
             default 3 if LVGL_PORT_AVOID_TEAR_MODE_3
 
-        choice
-            depends on LVGL_PORT_AVOID_TEAR_ENABLE
-            prompt "Select rotation"
-            default LVGL_PORT_ROTATION_0
-            config LVGL_PORT_ROTATION_0
-                bool "Rotation 0"
-            config LVGL_PORT_ROTATION_90
-                bool "Rotation 90"
-            config LVGL_PORT_ROTATION_180
-                bool "Rotation 180"
-            config LVGL_PORT_ROTATION_270
-                bool "Rotation 270"
-        endchoice
-
-        config LVGL_PORT_ROTATION_DEGREE
-            int
-            default 0 if LVGL_PORT_ROTATION_0
-            default 90 if LVGL_PORT_ROTATION_90
-            default 180 if LVGL_PORT_ROTATION_180
-            default 270 if LVGL_PORT_ROTATION_270
+        # Rotation was removed. The upstream option only ever took effect with
+        # tearing avoidance enabled, and silently did nothing otherwise. The
+        # panel is mounted landscape and LVGL can rotate a display itself if
+        # that ever changes.
 
         choice
             depends on !LVGL_PORT_AVOID_TEAR_ENABLE

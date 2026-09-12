@@ -334,7 +334,17 @@ static void n2k_task(void *arg)
         }
 
         if ((xTaskGetTickCount() - last_send) >= pdMS_TO_TICKS(N2K_RUDDER_PERIOD_MS)) {
+            /* Advance by exactly one period so the cadence does not drift with
+             * the service loop. If the task was starved for longer than that,
+             * resynchronise instead of catching up: the missed messages carry
+             * angles that are already stale, and sending them back to back at
+             * the service rate would put a burst on the bus in place of a
+             * steady 10 Hz. */
+            const TickType_t now = xTaskGetTickCount();
             last_send += pdMS_TO_TICKS(N2K_RUDDER_PERIOD_MS);
+            if ((now - last_send) >= pdMS_TO_TICKS(N2K_RUDDER_PERIOD_MS)) {
+                last_send = now;
+            }
 
             /* Read through the channel rather than the sensor directly, so what
              * goes on the wire and what appears on the gauge are the same value
@@ -396,13 +406,21 @@ extern "C" esp_err_t n2k_bridge_start(void)
         return ESP_FAIL;
     }
 
+    /* Set before the task exists: its first status_update() reads this, and a
+     * task that started promptly would otherwise report the bus as stopped. */
+    s_running = true;
+
     if (xTaskCreatePinnedToCore(n2k_task, "n2k", N2K_TASK_STACK_SIZE, nullptr,
                                 N2K_TASK_PRIORITY, nullptr, N2K_TASK_CORE) != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create NMEA 2000 task");
+        /* The CAN port stays open: the library exposes no way to close it, and
+         * a controller that is up but unserviced is harmless -- it acknowledges
+         * frames and nothing else. Failing here means the system is out of
+         * memory, so there is nothing useful to retry with either. */
+        ESP_LOGE(TAG, "Failed to create NMEA 2000 task; CAN port left open and unserviced");
+        s_running = false;
         return ESP_ERR_NO_MEM;
     }
 
-    s_running = true;
     ESP_LOGI(TAG, "NMEA 2000 started: TX=GPIO%d RX=GPIO%d, unique number %lu, PGN 127245 every %d ms",
              (int)N2K_CAN_TX_GPIO, (int)N2K_CAN_RX_GPIO, unique_number, N2K_RUDDER_PERIOD_MS);
     return ESP_OK;

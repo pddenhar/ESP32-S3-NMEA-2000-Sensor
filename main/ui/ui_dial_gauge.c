@@ -49,17 +49,20 @@ static bool value_is_alarming(const ui_dial_gauge_t *gauge, int32_t value)
     return false;
 }
 
-static void tick_labels_init(ui_dial_gauge_t *gauge)
+/* @p major_ticks is the clamped count, not spec->major_ticks: the label arrays
+ * are fixed at UI_DIAL_MAX_MAJOR_TICKS and a spec asking for more would write
+ * off the end of both of them. */
+static void tick_labels_init(ui_dial_gauge_t *gauge, int major_ticks)
 {
     const ui_dial_spec_t *spec = gauge->spec;
-    const int intervals = spec->major_ticks - 1;
+    const int intervals = major_ticks - 1;
 
-    for (int i = 0; i < spec->major_ticks; i++) {
+    for (int i = 0; i < major_ticks; i++) {
         const int32_t value = spec->min + (int32_t)((int64_t)(spec->max - spec->min) * i / intervals);
         snprintf(gauge->tick_labels[i], sizeof(gauge->tick_labels[i]), "%d", (int)value);
         gauge->tick_label_ptrs[i] = gauge->tick_labels[i];
     }
-    gauge->tick_label_ptrs[spec->major_ticks] = NULL;
+    gauge->tick_label_ptrs[major_ticks] = NULL;
 }
 
 static void update_readout(ui_dial_gauge_t *gauge)
@@ -116,7 +119,7 @@ void ui_dial_gauge_create(ui_dial_gauge_t *gauge, lv_obj_t *parent, int32_t size
     lv_scale_set_range(gauge->scale, spec->min, spec->max);
     lv_scale_set_label_show(gauge->scale, true);
 
-    tick_labels_init(gauge);
+    tick_labels_init(gauge, major_ticks);
     lv_scale_set_text_src(gauge->scale, gauge->tick_label_ptrs);
 
     lv_obj_set_style_bg_opa(gauge->scale, LV_OPA_TRANSP, 0);
@@ -201,9 +204,19 @@ void ui_dial_gauge_set_no_data(ui_dial_gauge_t *gauge)
  * Gauge class adapter; see the note in ui_rudder_gauge.c on tile ownership.
  * ------------------------------------------------------------------------- */
 
+/* LVGL sends LV_EVENT_DELETE to an object before it deletes that object's
+ * children, so the scale is still alive when this runs -- and it holds a
+ * pointer to tick_label_ptrs, which lives inside the block about to be freed.
+ * Drop the reference before freeing rather than leaving it dangling for the
+ * rest of the teardown. */
 static void gauge_free_cb(lv_event_t *e)
 {
-    lv_free(lv_event_get_user_data(e));
+    ui_dial_gauge_t *gauge = lv_event_get_user_data(e);
+
+    if (gauge->scale != NULL) {
+        lv_scale_set_text_src(gauge->scale, NULL);
+    }
+    lv_free(gauge);
 }
 
 lv_obj_t *ui_dial_gauge_class_create(lv_obj_t *parent, int32_t size, const char *title,

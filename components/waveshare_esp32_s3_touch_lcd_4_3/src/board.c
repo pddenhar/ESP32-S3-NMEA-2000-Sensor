@@ -6,6 +6,7 @@
 
 #include "bsp/board.h"
 #include "bsp/lvgl_port.h"
+#include "esp_private/esp_gpio_reserve.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -68,23 +69,39 @@ i2c_master_bus_handle_t waveshare_esp32_s3_i2c_bus_handle(void)
 }
 
 
-// GPIO initialization
-static esp_err_t gpio_init(void)
+/* Put CTP_IRQ in the state the address latch needs, or hand it back.
+ *
+ * The GT911 samples this pin as its reset is released and latches its I2C
+ * address from the level it sees: low is 0x5D, which is the address the driver
+ * is configured for. Once the controller is running the pin is its interrupt
+ * output, so the ESP32 stops driving it -- the reset sequence is the only time
+ * it may. */
+static esp_err_t touch_int_drive_low(bool drive)
 {
-    // Zero-initialize the config structure
-    gpio_config_t io_conf = {};
-    // Disable interrupt
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    // Bit mask of the pins, use GPIO4 here
-    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;
-    // Set as input mode
-    io_conf.mode = GPIO_MODE_OUTPUT;
+    /* Configuring the pin for output reserves it, and the reservation outlives
+     * the mode. Handing it back without revoking leaves gpio_config() seeing a
+     * reserved pin whose input is off, which it reports as a conflict -- and
+     * leaves GPIO4 looking claimed to anything that configures it later. */
+    if (!drive) {
+        esp_gpio_revoke(GPIO_TOUCH_INT_SEL);
+    }
 
-    return gpio_config(&io_conf);
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .pin_bit_mask = GPIO_TOUCH_INT_SEL,
+        .mode = drive ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK || !drive) {
+        return ret;
+    }
+    return gpio_set_level(GPIO_TOUCH_INT, 0);
 }
 
 // Reset the touch screen
-static esp_err_t waveshare_esp32_s3_touch_reset()
+static esp_err_t waveshare_esp32_s3_touch_reset(void)
 {
     uint8_t write_buf = 0x01;
     esp_err_t ret = i2c_master_transmit(ch422g_ctrl_handle, &write_buf, 1, I2C_MASTER_TIMEOUT_MS);
@@ -96,14 +113,20 @@ static esp_err_t waveshare_esp32_s3_touch_reset()
     if (ret != ESP_OK) return ret;
 
     vTaskDelay(pdMS_TO_TICKS(100));
-    ret = gpio_set_level(GPIO_INPUT_IO_4, 0);
+    // Hold CTP_IRQ low so the controller latches address 0x5D on release
+    ret = touch_int_drive_low(true);
     if (ret != ESP_OK) return ret;
     vTaskDelay(pdMS_TO_TICKS(100));
     write_buf = 0x2E;
     ret = i2c_master_transmit(ch422g_out_handle, &write_buf, 1, I2C_MASTER_TIMEOUT_MS);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) {
+        touch_int_drive_low(false);
+        return ret;
+    }
     vTaskDelay(pdMS_TO_TICKS(200));
-    return ESP_OK;
+
+    // Address is latched; the pin belongs to the controller again
+    return touch_int_drive_low(false);
 }
 
 esp_err_t waveshare_esp32_s3_touch_recover(void)
@@ -206,9 +229,6 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lcd_panel_handle_t *ret_panel, esp
         ESP_LOGI(TAG, "Initialize I2C bus"); // Log the initialization of the I2C bus
         esp_err_t ret = i2c_master_init(); // Initialize the I2C master
         if (ret != ESP_OK) return ret;
-        ESP_LOGI(TAG, "Initialize GPIO"); // Log GPIO initialization
-        ret = gpio_init(); // Initialize GPIO pins
-        if ( ret != ESP_OK) return ret; 
         ESP_LOGI(TAG, "Initialize Touch LCD"); // Log touch LCD initialization
         ret = waveshare_esp32_s3_touch_reset(); // Reset the touch panel
         if (ret != ESP_OK) return ret;
@@ -226,7 +246,12 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lcd_panel_handle_t *ret_panel, esp
         ESP_LOGI(TAG, "Initialize I2C panel IO"); // Log I2C panel I/O initialization
         esp_err_t io_ret = esp_lcd_new_panel_io_i2c(i2c_bus_handle, &tp_io_config, &tp_io_handle);
         if (io_ret != ESP_OK) {
-            ESP_LOGE(TAG, "esp_lcd_new_panel_io_i2c failed: %s", esp_err_to_name(io_ret));
+            /* Nothing downstream can run without it -- the GT911 driver
+             * dereferences this handle -- so stop here and let the panel come
+             * up without touch. */
+            ESP_LOGE(TAG, "esp_lcd_new_panel_io_i2c failed: %s; continuing without touch",
+                     esp_err_to_name(io_ret));
+            goto touch_done;
         }
 
         ESP_LOGI(TAG, "Initialize touch controller GT911"); // Log touch controller initialization
@@ -247,8 +272,13 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lcd_panel_handle_t *ret_panel, esp
         };
         esp_err_t touch_ret = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, &tp_handle);
         if (touch_ret != ESP_OK) {
-            ESP_LOGE(TAG, "esp_lcd_touch_new_i2c_gt911 failed: %s", esp_err_to_name(touch_ret));
+            ESP_LOGE(TAG, "esp_lcd_touch_new_i2c_gt911 failed: %s; continuing without touch",
+                     esp_err_to_name(touch_ret));
+            tp_handle = NULL;
+            esp_lcd_panel_io_del(tp_io_handle);
         }
+
+    touch_done:
     #endif // CONFIG_LCD_TOUCH_CONTROLLER_GT911
 
         if (ret_panel) {

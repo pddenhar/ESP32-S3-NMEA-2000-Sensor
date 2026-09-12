@@ -79,16 +79,15 @@ extern "C" {
 #define LVGL_PORT_AVOID_TEAR_MODE       (CONFIG_LVGL_PORT_AVOID_TEAR_MODE)
 
 /**
- * Set the rotation degree of the LCD panel when the avoid tearing function is enabled:
- *      - 0: 0 degree
- *      - 90: 90 degree
- *      - 180: 180 degree
- *      - 270: 270 degree
+ * Panel rotation is deliberately not supported here.
  *
- */
-#define LVGL_PORT_ROTATION_DEGREE  (CONFIG_LVGL_PORT_ROTATION_DEGREE)
-
-/**
+ * Upstream had a rotation option that only took effect with tearing avoidance
+ * enabled and was silently ignored otherwise -- the macro was not even defined
+ * in that configuration, so every `#if` testing it evaluated to 0 with no
+ * warning. The panel is mounted landscape; if that ever changes, rotate the
+ * display through LVGL (lv_display_set_rotation) rather than reviving the
+ * software pixel-rotation path this port used to carry.
+ *
  * Below configurations are automatically set according to the above configurations, users do not need to modify them.
  *
  */
@@ -102,22 +101,6 @@ extern "C" {
 #define LVGL_PORT_LCD_RGB_BUFFER_NUMS   (2)
 #define LVGL_PORT_DIRECT_MODE           (1)
 #endif /* LVGL_PORT_AVOID_TEAR_MODE */
-
-#if LVGL_PORT_ROTATION_DEGREE == 0
-#define LVGL_PORT_ROTATION_0    (1)
-#else
-#if LVGL_PORT_ROTATION_DEGREE == 90
-#define LVGL_PORT_ROTATION_90   (1)
-#elif LVGL_PORT_ROTATION_DEGREE == 180
-#define LVGL_PORT_ROTATION_180  (1)
-#elif LVGL_PORT_ROTATION_DEGREE == 270
-#define LVGL_PORT_ROTATION_270  (1)
-#endif
-#ifdef LVGL_PORT_LCD_RGB_BUFFER_NUMS
-#undef LVGL_PORT_LCD_RGB_BUFFER_NUMS
-#define LVGL_PORT_LCD_RGB_BUFFER_NUMS   (3)
-#endif
-#endif /* LVGL_PORT_ROTATION_DEGREE */
 #else
 #define LVGL_PORT_LCD_RGB_BUFFER_NUMS   (1)
 #define LVGL_PORT_FULL_REFRESH          (0)
@@ -140,7 +123,11 @@ esp_err_t lvgl_port_init(esp_lcd_panel_handle_t lcd_handle, esp_lcd_touch_handle
 /**
  * @brief Take LVGL mutex
  *
- * @param[in] timeout_ms: Timeout in [ms]. 0 will block indefinitely.
+ * Recursive: a task that already holds the mutex may take it again, and must
+ * release it once per take.
+ *
+ * @param[in] timeout_ms: How long to wait. Negative blocks indefinitely; 0
+ *                        returns immediately if the mutex is held elsewhere.
  *
  * @return
  *      - true:  Mutex was taken

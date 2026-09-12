@@ -53,7 +53,7 @@ typedef struct {
     uint32_t win_first;   /* Timestamp of the edge the window opened on */
     uint32_t win_last;    /* Timestamp of the most recent edge */
     uint32_t win_count;   /* Capture intervals accumulated since win_first */
-    bool win_open;
+    bool win_started;     /* False only before the very first edge ever seen */
 
     /* Last completed window. Integers only: the Xtensa FPU is not saved across
      * interrupts, so readers do the division. The ISR fills the idle slot then
@@ -71,11 +71,14 @@ static bool IRAM_ATTR rudder_capture_cb(mcpwm_cap_channel_handle_t chan,
     rudder_ctx_t *ctx = (rudder_ctx_t *)user_ctx;
     const uint32_t ts = edata->cap_value;
 
-    if (!ctx->win_open) {
+    /* The first edge ever seen only establishes a reference point -- there is
+     * no previous timestamp to measure an interval against. Every later
+     * re-open goes through the dropout branch below. */
+    if (!ctx->win_started) {
         ctx->win_first = ts;
         ctx->win_last = ts;
         ctx->win_count = 0;
-        ctx->win_open = true;
+        ctx->win_started = true;
         return false;
     }
 
@@ -143,6 +146,8 @@ esp_err_t rudder_sensor_init(const rudder_sensor_config_t *config)
     }
 
     esp_err_t ret = ESP_OK;
+    bool chan_enabled = false;
+    bool timer_enabled = false;
 
     /* Park the RS485 driver before anything starts listening: an auto-direction
      * transceiver enables its driver whenever DI goes low, which would overwrite
@@ -220,14 +225,21 @@ esp_err_t rudder_sensor_init(const rudder_sensor_config_t *config)
     ctx->gap_reset_ticks = (uint32_t)((float)ctx->resolution_hz * ctx->cfg.prescale *
                                       RUDDER_GAP_FACTOR / ctx->min_hz);
 
+    /* Tracked so the cleanup path can disable before deleting: the driver
+     * refuses to delete an enabled channel or timer, so unwinding in the wrong
+     * order would leak the capture unit and leave the group claimed. */
     ret = mcpwm_capture_channel_enable(ctx->cap_chan);
     if (ret != ESP_OK) {
         goto fail;
     }
+    chan_enabled = true;
+
     ret = mcpwm_capture_timer_enable(ctx->cap_timer);
     if (ret != ESP_OK) {
         goto fail;
     }
+    timer_enabled = true;
+
     ret = mcpwm_capture_timer_start(ctx->cap_timer);
     if (ret != ESP_OK) {
         goto fail;
@@ -240,11 +252,20 @@ esp_err_t rudder_sensor_init(const rudder_sensor_config_t *config)
     return ESP_OK;
 
 fail:
+    if (timer_enabled) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(mcpwm_capture_timer_disable(ctx->cap_timer));
+    }
+    if (chan_enabled) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(mcpwm_capture_channel_disable(ctx->cap_chan));
+    }
     if (ctx->cap_chan != NULL) {
-        mcpwm_del_capture_channel(ctx->cap_chan);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(mcpwm_del_capture_channel(ctx->cap_chan));
     }
     if (ctx->cap_timer != NULL) {
-        mcpwm_del_capture_timer(ctx->cap_timer);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(mcpwm_del_capture_timer(ctx->cap_timer));
+    }
+    if (ctx->cfg.rs485_tx_idle_gpio >= 0) {
+        gpio_reset_pin(ctx->cfg.rs485_tx_idle_gpio);
     }
     free(ctx);
     return ret;
@@ -265,8 +286,13 @@ esp_err_t rudder_sensor_read(rudder_sensor_reading_t *out)
     int tries = 0;
     do {
         if (++tries > RUDDER_READ_MAX_TRIES) {
+            /* The ISR publishes once per window (100 Hz by default), so losing
+             * this many races in a row is not contention -- it means captures
+             * are arriving far faster than the configured window implies, which
+             * is a wiring or prescale problem worth seeing rather than
+             * reporting as a routine no-reading. */
             memset(out, 0, sizeof(*out));
-            return ESP_OK;
+            return ESP_ERR_TIMEOUT;
         }
         gen = atomic_load_explicit(&ctx->pub_gen, memory_order_acquire);
         sample = ctx->pub_slot[gen & 1u];

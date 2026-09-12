@@ -11,10 +11,12 @@ extern "C" {
  * Which gauges the user last chose, kept in NVS so a panel instrument comes
  * back the way it was left after being switched off with the boat.
  *
- * The selection is stored as PGN numbers rather than channel ids: ids are
- * indices into a table that will be reordered as PGNs are added, whereas a PGN
- * means the same thing forever. Anything that no longer maps to a channel is
- * dropped on load.
+ * The selection is stored as channel keys rather than channel ids: ids are
+ * indices into a table that will be reordered as channels are added, whereas a
+ * key names one channel for good. A PGN would not do either -- one message can
+ * feed several channels, so it does not say which of them was chosen (see
+ * n2k_channels.h). Anything that no longer maps to a channel is dropped on
+ * load.
  *
  * nvs_flash_init() must have been called first.
  */
