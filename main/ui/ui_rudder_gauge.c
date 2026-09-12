@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -206,3 +207,49 @@ void ui_rudder_gauge_set_no_data(ui_rudder_gauge_t *gauge)
     gauge->valid = false;
     update_readout(gauge);
 }
+
+/* ---------------------------------------------------------------------------
+ * Gauge class adapter
+ *
+ * The struct is owned by the tile: allocated here, reachable through the tile's
+ * user data, and freed when LVGL deletes the tile. That is what lets the panel
+ * create and destroy tiles as the selection changes without tracking storage
+ * for each one.
+ * ------------------------------------------------------------------------- */
+
+static void gauge_free_cb(lv_event_t *e)
+{
+    lv_free(lv_event_get_user_data(e));
+}
+
+static lv_obj_t *gauge_create(lv_obj_t *parent, int32_t size, const char *title)
+{
+    ui_rudder_gauge_t *gauge = lv_malloc(sizeof(ui_rudder_gauge_t));
+    if (gauge == NULL) {
+        return NULL;
+    }
+
+    /* +/-45 deg covers the stops of a typical rudder; the sensor's own
+     * plausible band is wider (see rudder_sensor.h) and the gauge clamps. */
+    ui_rudder_gauge_create(gauge, parent, size, 45);
+    ui_rudder_gauge_set_title(gauge, title);
+    lv_obj_set_user_data(gauge->cont, gauge);
+    lv_obj_add_event_cb(gauge->cont, gauge_free_cb, LV_EVENT_DELETE, gauge);
+    return gauge->cont;
+}
+
+static void gauge_update(lv_obj_t *tile, const n2k_reading_t *reading)
+{
+    ui_rudder_gauge_t *gauge = lv_obj_get_user_data(tile);
+
+    if (reading->valid) {
+        ui_rudder_gauge_set_value(gauge, (int32_t)lroundf(reading->value));
+    } else {
+        ui_rudder_gauge_set_no_data(gauge);
+    }
+}
+
+const ui_gauge_class_t ui_gauge_rudder = {
+    .create = gauge_create,
+    .update = gauge_update,
+};

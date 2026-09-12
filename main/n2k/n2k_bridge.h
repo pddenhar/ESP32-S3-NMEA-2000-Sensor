@@ -23,50 +23,14 @@ extern "C" {
  * value rather than a stale or zero angle, so a display shows a blank rather
  * than a rudder that appears centred.
  *
- * Received PGNs of interest are decoded in the same task and cached for the UI
- * to poll. Like the rudder sensor, there is no queue and no callback: readers
- * ask for the latest value whenever they need one, and get a "no data" answer
- * when nothing recent has arrived.
+ * Received PGNs of interest are decoded in the same task and published into
+ * n2k_channels, which is where the UI reads them from -- see n2k_channels.h for
+ * how to add another.
  */
 esp_err_t n2k_bridge_start(void);
 
 /** True once the CAN port is open and the stack is running. */
 bool n2k_bridge_is_running(void);
-
-/* --------------------------------------------------------------------------
- * Received data
- * ------------------------------------------------------------------------ */
-
-/** Reference frame a heading is measured against (PGN 127250). */
-typedef enum {
-    N2K_HEADING_REF_TRUE = 0,
-    N2K_HEADING_REF_MAGNETIC,
-} n2k_heading_ref_t;
-
-typedef struct {
-    /**
-     * False when no usable heading is on hand: nothing received yet, the
-     * sending device stopped, or it reported the heading as not available.
-     * The other fields are meaningless in that case.
-     */
-    bool valid;
-    float heading_deg;        /* 0..360, in the frame given by `reference` */
-    n2k_heading_ref_t reference;
-    uint8_t source_address;   /* Device that sent it, useful for diagnostics */
-    int64_t timestamp_us;     /* esp_timer time the message was decoded */
-} n2k_heading_t;
-
-/**
- * Fetch the most recent vessel heading (PGN 127250). Safe to call from any task.
- *
- * Returns ESP_OK with @p out->valid set false when there is no recent reading;
- * no compass on the bus is a normal state, not an error.
- *
- * With more than one heading source on the bus, the first one heard from wins
- * and is kept until it goes quiet, so the reading does not alternate between
- * devices. `source_address` says which one it currently is.
- */
-esp_err_t n2k_bridge_read_heading(n2k_heading_t *out);
 
 /* --------------------------------------------------------------------------
  * Bus status

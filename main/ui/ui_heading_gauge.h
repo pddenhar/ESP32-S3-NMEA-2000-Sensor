@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lvgl.h"
+#include "ui_gauge.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,9 @@ void ui_heading_gauge_set_value(ui_heading_gauge_t *gauge, int32_t heading_deg, 
 
 /** Show the "no reading" state: needle parked on north, readout dashed out. */
 void ui_heading_gauge_set_no_data(ui_heading_gauge_t *gauge);
+
+/** Gauge class for the panel's tile machinery; see ui_gauge.h. */
+extern const ui_gauge_class_t ui_gauge_compass;
 
 #ifdef __cplusplus
 }

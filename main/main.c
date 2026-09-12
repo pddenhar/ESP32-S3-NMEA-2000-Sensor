@@ -1,5 +1,6 @@
 
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "bsp/lvgl_port.h"
 #include "bsp/board.h"
 #include "ui/ui_main.h"
@@ -8,11 +9,31 @@
 
 static const char *TAG = "main";
 
+/* Holds the chosen gauges across power cycles. A failure here is not fatal:
+ * the panel falls back to its default selection and simply forgets changes. */
+static void nvs_init(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        /* A partition written by another build, or one that filled up. Neither
+         * holds anything this device cannot recreate. */
+        ESP_LOGW(TAG, "Reformatting NVS: %s", esp_err_to_name(ret));
+        if (nvs_flash_erase() == ESP_OK) {
+            ret = nvs_flash_init();
+        }
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
+    }
+}
+
 void app_main(void)
 {
 
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_touch_handle_t touch_handle = NULL;
+
+    nvs_init();
 
     // Initialize LCD and touch hardware
         esp_err_t ret = waveshare_esp32_s3_rgb_lcd_init(&panel_handle, &touch_handle);

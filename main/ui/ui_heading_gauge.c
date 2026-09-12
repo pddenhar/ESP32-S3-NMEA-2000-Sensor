@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 
 #include "ui_heading_gauge.h"
@@ -190,3 +191,43 @@ void ui_heading_gauge_set_no_data(ui_heading_gauge_t *gauge)
     gauge->valid = false;
     update_readout(gauge);
 }
+
+/* ---------------------------------------------------------------------------
+ * Gauge class adapter; see the note in ui_rudder_gauge.c on tile ownership.
+ * ------------------------------------------------------------------------- */
+
+static void gauge_free_cb(lv_event_t *e)
+{
+    lv_free(lv_event_get_user_data(e));
+}
+
+static lv_obj_t *gauge_create(lv_obj_t *parent, int32_t size, const char *title)
+{
+    ui_heading_gauge_t *gauge = lv_malloc(sizeof(ui_heading_gauge_t));
+    if (gauge == NULL) {
+        return NULL;
+    }
+
+    ui_heading_gauge_create(gauge, parent, size);
+    ui_heading_gauge_set_title(gauge, title);
+    lv_obj_set_user_data(gauge->cont, gauge);
+    lv_obj_add_event_cb(gauge->cont, gauge_free_cb, LV_EVENT_DELETE, gauge);
+    return gauge->cont;
+}
+
+static void gauge_update(lv_obj_t *tile, const n2k_reading_t *reading)
+{
+    ui_heading_gauge_t *gauge = lv_obj_get_user_data(tile);
+
+    if (reading->valid) {
+        ui_heading_gauge_set_value(gauge, (int32_t)lroundf(reading->value),
+                                   reading->qualifier == N2K_HEADING_REF_MAGNETIC);
+    } else {
+        ui_heading_gauge_set_no_data(gauge);
+    }
+}
+
+const ui_gauge_class_t ui_gauge_compass = {
+    .create = gauge_create,
+    .update = gauge_update,
+};

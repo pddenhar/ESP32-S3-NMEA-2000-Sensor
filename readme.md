@@ -20,14 +20,71 @@ If the sensor Rsense is connected to A, bias B to half of the voltage swing rang
 
 ## NMEA 2000 Data
 
+Everything on the panel is a *channel*: a value, its units, how long it stays
+good, and where it came from. Rudder angle is not a special case for being
+measured here rather than received -- it is simply the channel whose data
+originates on this device. The table lives in `main/n2k/n2k_channels.c`.
+
 **Out:** PGN 127245 (Rudder), 10 Hz, from the RF300 above.
+
+**In:** PGN 127489 (Engine Parameters, Dynamic) feeds two channels, coolant
+temperature and oil pressure. One message can feed any number of channels --
+each reading the panel can draw is its own -- so a field that goes missing
+blanks its own gauge while the others keep updating. Only engine instance 0 (a
+single or port engine) is decoded: a twin-screw boat sends this PGN once per
+engine, often from the same ECU, so the source address does not separate them.
+See `N2K_ENGINE_INSTANCE` in `n2k_bridge.cpp`.
+
+Engine readouts are in °F and psi. Set `N2K_ENGINE_UNITS_US` to 0 in
+`n2k_channels.h` for °C and kPa; the units label, the dial range and the alarm
+points all follow from that one switch.
 
 **In:** PGN 127250 (Vessel Heading), shown on the heading gauge. The PGN carries
 a flag saying whether the heading is referenced to true or to magnetic north --
 the two differ by the local variation, so the gauge always labels which one it
 is showing rather than leaving it to be assumed. A heading is blanked after 3 s
-of silence from its sender. If two devices send heading, the first one heard
-from keeps the display until it goes quiet.
+of silence from its sender. If two devices send the same PGN, the first one
+heard from keeps the channel until it goes quiet -- otherwise the readout
+alternates between senders that disagree by a degree or two.
+
+### Choosing gauges
+
+The hamburger at the top left opens a drawer listing every channel that has a
+gauge to draw it, with its PGN and a dot that lights green while data is
+arriving -- so a gauge can be selected before its sender is powered up, and a
+silent sender can be told apart from a missing one. Two gauges fit on screen;
+with both slots full the remaining rows are disabled rather than letting a new
+choice silently evict a gauge that is being watched. The selection is saved to
+NVS a couple of seconds after the last change and restored on boot.
+
+### Adding a PGN
+
+Four small edits, none of them to layout or timer code:
+
+1. An id in `n2k_channel_id_t` and a row in `s_channels[]`
+   (`main/n2k/n2k_channels.c`) giving the key, PGN, display name, units and
+   timeout.
+2. A `case` in the receive handler in `main/n2k/n2k_bridge.cpp` that parses the
+   message and calls `n2k_channels_publish()`. Add the PGN to
+   `kReceiveMessages[]` too, so the device declares what it listens for.
+3. A gauge. Anything that is a number between two bounds needs no new widget:
+   write a `ui_dial_spec_t` and one `UI_DIAL_GAUGE_CLASS_DEFINE` line, as
+   `main/ui/ui_engine_gauges.c` does. A reading that needs its own shape gets a
+   widget exporting a `ui_gauge_class_t` -- see the adapter at the bottom of
+   `main/ui/ui_heading_gauge.c`, two functions, create and update.
+4. That class in `s_gauge_classes[]` in `main/ui/ui_main.c`.
+
+The **key** is what the saved selection is stored under, so it has to be unique
+per channel and must never be renamed once shipped. It cannot be the PGN:
+several channels share 127489, and a PGN would not say which of them the user
+chose.
+
+Leave step 4 out and the channel is decoded and transmitted but stays out of the
+menu, which is a reasonable place to stop until the widget exists.
+
+Locally measured channels differ only in having a `pull` function in the table
+instead of being published into: the value is fetched from its driver on demand
+rather than cached, which is what keeps the rudder's 100 Hz display path intact.
 
 ### Bus status indicator
 
@@ -44,9 +101,11 @@ The header line reports what the device can actually tell about its connection:
 The error state of the CAN controller is what drives this, rather than waiting
 for received traffic to dry up: a node alone on the wire climbs out of
 error-active within a few transmit attempts, whereas a quiet-but-healthy bus
-may send nothing for a minute between heartbeats. A bad state is held for three
-seconds before a better one is believed, because a disconnected bus cycles
-through bus-off and recovery continuously and would otherwise flicker.
+may send nothing for a minute between heartbeats. A *fault* is held for three
+seconds before a better reading is believed, because a disconnected bus cycles
+through bus-off and recovery continuously and would otherwise flicker. Claiming
+an address is not held: it happens once at startup, finishes in about a quarter
+of a second, and never oscillates.
 
 ---
 

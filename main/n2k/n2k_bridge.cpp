@@ -12,7 +12,7 @@
 #include "freertos/task.h"
 
 extern "C" {
-#include "rudder_sensor.h"
+#include "n2k_channels.h"
 }
 
 static const char *TAG = "n2k";
@@ -23,12 +23,11 @@ static const char *TAG = "n2k";
 
 #define N2K_RUDDER_INSTANCE 0
 
+/* Which engine's parameters to display. 0 is a single or port engine. */
+#define N2K_ENGINE_INSTANCE 0
+
 /* PGN 127245 is normally transmitted at 10 Hz. */
 #define N2K_RUDDER_PERIOD_MS 100
-
-/* PGN 127250 is normally transmitted at 10 Hz, so three seconds of silence
- * means the compass has stopped rather than that we missed a message. */
-#define N2K_HEADING_TIMEOUT_MS 3000
 
 /* How often the controller is polled for its error state. The state changes
  * over several frame times, so there is nothing to gain from polling faster,
@@ -67,7 +66,7 @@ static const char *TAG = "n2k";
 /* Declaring what we transmit and receive lets other devices discover this
  * node's interface without having to observe traffic. */
 static const unsigned long kTransmitMessages[] = {127245UL, 0};
-static const unsigned long kReceiveMessages[] = {127250UL, 0};
+static const unsigned long kReceiveMessages[] = {127250UL, 127488UL, 127489UL, 0};
 
 /* The library keeps the address-claim state protected, since it is only
  * meaningful to the code servicing the stack. This node does service the stack,
@@ -87,10 +86,9 @@ static volatile bool s_running = false;
 static char s_serial[16];
 
 /* Shared with the UI task. Written only by the N2K task; the spinlock keeps a
- * reader from seeing half of an update. Both structs are small enough that
- * copying them under the lock costs less than any double-buffering scheme. */
+ * reader from seeing half of an update. Decoded values go to n2k_channels
+ * instead; what is left here is the bus's own state. */
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
-static n2k_heading_t s_heading;
 static n2k_bridge_status_t s_status;
 
 /* A NAME that collides with another node's breaks address claiming, so the
@@ -127,18 +125,6 @@ static void handle_heading(const tN2kMsg &msg)
         return;
     }
 
-    const int64_t now_us = esp_timer_get_time();
-
-    /* A boat can easily carry two heading sources (a fluxgate on the autopilot
-     * and a satellite compass, say). Stay with whichever one was heard from
-     * first and only change over once it has gone quiet, rather than letting
-     * the readout alternate between two devices that disagree by a degree or
-     * two. Safe to read unlocked: only this task writes s_heading. */
-    if (s_heading.valid && s_heading.source_address != msg.Source &&
-        (now_us - s_heading.timestamp_us) < (int64_t)N2K_HEADING_TIMEOUT_MS * 1000) {
-        return;
-    }
-
     double heading_deg = RadToDeg(heading_rad);
     /* Wrapped rather than clamped: a sender is free to use a full-circle value
      * just outside 0..2pi, and a heading is modular anyway. */
@@ -147,13 +133,90 @@ static void handle_heading(const tN2kMsg &msg)
         heading_deg += 360.0;
     }
 
-    portENTER_CRITICAL(&s_state_lock);
-    s_heading.valid = true;
-    s_heading.heading_deg = (float)heading_deg;
-    s_heading.reference = (ref == N2khr_magnetic) ? N2K_HEADING_REF_MAGNETIC : N2K_HEADING_REF_TRUE;
-    s_heading.source_address = msg.Source;
-    s_heading.timestamp_us = now_us;
-    portEXIT_CRITICAL(&s_state_lock);
+    /* Publishing, rather than storing, is what applies the shared rules: which
+     * sender owns the channel when several send the same PGN, and how long the
+     * value stays good. */
+    n2k_reading_t reading = {};
+    reading.valid = true;
+    reading.value = (float)heading_deg;
+    reading.qualifier = (ref == N2khr_magnetic) ? N2K_HEADING_REF_MAGNETIC : N2K_HEADING_REF_TRUE;
+    reading.source_address = msg.Source;
+    reading.timestamp_us = esp_timer_get_time();
+    n2k_channels_publish(N2K_CH_HEADING, &reading);
+}
+
+/* PGN 127488 also carries boost pressure and tilt/trim; only what the panel
+ * draws is decoded, and the rest can be added a channel at a time. */
+static void handle_engine_rapid(const tN2kMsg &msg)
+{
+    unsigned char instance = 0;
+    double speed_rpm = N2kDoubleNA;
+    double boost_pressure_pa = N2kDoubleNA;
+    int8_t tilt_trim = 0;
+
+    if (!ParseN2kEngineParamRapid(msg, instance, speed_rpm, boost_pressure_pa, tilt_trim)) {
+        return;
+    }
+    if (instance != N2K_ENGINE_INSTANCE || N2kIsNA(speed_rpm)) {
+        return;
+    }
+
+    n2k_reading_t reading = {};
+    reading.valid = true;
+    reading.value = (float)speed_rpm;
+    reading.source_address = msg.Source;
+    reading.timestamp_us = esp_timer_get_time();
+    n2k_channels_publish(N2K_CH_ENGINE_SPEED, &reading);
+}
+
+/* One message, several channels: PGN 127489 carries a dozen engine readings and
+ * each one the panel can draw is published separately, so a gauge blanks on its
+ * own if its field is absent while the others keep updating. */
+static void handle_engine_dynamic(const tN2kMsg &msg)
+{
+    unsigned char instance = 0;
+    double oil_pressure_pa = N2kDoubleNA;
+    double oil_temp_k = N2kDoubleNA;
+    double coolant_temp_k = N2kDoubleNA;
+    double alternator_v = N2kDoubleNA;
+    double fuel_rate = N2kDoubleNA;
+    double engine_hours = N2kDoubleNA;
+    double coolant_pressure_pa = N2kDoubleNA;
+    double fuel_pressure_pa = N2kDoubleNA;
+    int8_t load_pct = 0;
+    int8_t torque_pct = 0;
+
+    if (!ParseN2kEngineDynamicParam(msg, instance, oil_pressure_pa, oil_temp_k,
+                                    coolant_temp_k, alternator_v, fuel_rate, engine_hours,
+                                    coolant_pressure_pa, fuel_pressure_pa, load_pct,
+                                    torque_pct)) {
+        return;
+    }
+
+    /* A twin-screw boat sends this PGN once per engine, and both can come from
+     * the same ECU -- so the source address does not separate them and the
+     * channel would show whichever arrived last. Only the configured engine is
+     * decoded until there is a gauge that says which engine it is showing. */
+    if (instance != N2K_ENGINE_INSTANCE) {
+        return;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+
+    n2k_reading_t reading = {};
+    reading.valid = true;
+    reading.source_address = msg.Source;
+    reading.timestamp_us = now_us;
+
+    if (!N2kIsNA(coolant_temp_k)) {
+        reading.value = n2k_temp_from_kelvin(coolant_temp_k);
+        n2k_channels_publish(N2K_CH_ENGINE_TEMP, &reading);
+    }
+
+    if (!N2kIsNA(oil_pressure_pa)) {
+        reading.value = n2k_pressure_from_pascal(oil_pressure_pa);
+        n2k_channels_publish(N2K_CH_ENGINE_OIL_PRESSURE, &reading);
+    }
 }
 
 static void n2k_msg_handler(const tN2kMsg &msg)
@@ -169,6 +232,12 @@ static void n2k_msg_handler(const tN2kMsg &msg)
     switch (msg.PGN) {
     case 127250UL:
         handle_heading(msg);
+        break;
+    case 127488UL:
+        handle_engine_rapid(msg);
+        break;
+    case 127489UL:
+        handle_engine_dynamic(msg);
         break;
     default:
         break;
@@ -205,15 +274,22 @@ static void status_update(void)
      * bus-off, recovers, comes back error-active with the counters cleared, and
      * climbs out again within a second or two. Reporting each step verbatim
      * makes the indicator flicker between three readings while the fault is
-     * unchanged, so the worst state seen recently is what gets published. The
-     * enum is ordered worst-first, which is what makes the comparison work. */
+     * unchanged, so a fault is held briefly and a recovery has to outlast it.
+     * The enum is ordered worst-first, which is what makes the comparison work.
+     *
+     * Only faults are held. Claiming an address is a one-off startup step that
+     * finishes in about a quarter of a second and never oscillates, so holding
+     * it would just mean the panel reported "claiming" for three seconds after
+     * the device was already online. */
     static n2k_bus_state_t held_state = N2K_BUS_ONLINE;
     static int64_t hold_until_us = 0;
 
     const int64_t now_us = esp_timer_get_time();
     if (state <= held_state || now_us >= hold_until_us) {
         held_state = state;
-        hold_until_us = now_us + (int64_t)N2K_STATUS_HOLD_MS * 1000;
+        hold_until_us = (state <= N2K_BUS_ERROR)
+                            ? now_us + (int64_t)N2K_STATUS_HOLD_MS * 1000
+                            : 0;
     } else {
         state = held_state;
     }
@@ -260,14 +336,17 @@ static void n2k_task(void *arg)
         if ((xTaskGetTickCount() - last_send) >= pdMS_TO_TICKS(N2K_RUDDER_PERIOD_MS)) {
             last_send += pdMS_TO_TICKS(N2K_RUDDER_PERIOD_MS);
 
-            rudder_sensor_reading_t reading;
+            /* Read through the channel rather than the sensor directly, so what
+             * goes on the wire and what appears on the gauge are the same value
+             * from the same conversion. */
+            n2k_reading_t reading;
             /* N2kDoubleNA is NMEA 2000's "not available". Sending it keeps the
              * PGN cadence steady while telling listeners the reading is absent,
              * which is what makes a display blank the field instead of showing
              * a rudder that looks centred. */
             double position_rad = N2kDoubleNA;
-            if (rudder_sensor_read(&reading) == ESP_OK && reading.valid) {
-                position_rad = DegToRad(reading.angle_deg);
+            if (n2k_channels_read(N2K_CH_RUDDER, &reading) == ESP_OK && reading.valid) {
+                position_rad = DegToRad(reading.value);
             }
 
             tN2kMsg msg;
@@ -332,25 +411,6 @@ extern "C" esp_err_t n2k_bridge_start(void)
 extern "C" bool n2k_bridge_is_running(void)
 {
     return s_running;
-}
-
-extern "C" esp_err_t n2k_bridge_read_heading(n2k_heading_t *out)
-{
-    if (out == nullptr) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    portENTER_CRITICAL(&s_state_lock);
-    *out = s_heading;
-    portEXIT_CRITICAL(&s_state_lock);
-
-    /* Aged out here rather than in the receive path so that a compass that
-     * stops sending blanks the reading without needing anything to run. */
-    if (out->valid &&
-        (esp_timer_get_time() - out->timestamp_us) > (int64_t)N2K_HEADING_TIMEOUT_MS * 1000) {
-        out->valid = false;
-    }
-    return ESP_OK;
 }
 
 extern "C" void n2k_bridge_get_status(n2k_bridge_status_t *out)
