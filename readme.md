@@ -18,6 +18,38 @@ If the sensor Rsense is connected to A, bias B to half of the voltage swing rang
 
 ---
 
+## NMEA 2000 Data
+
+**Out:** PGN 127245 (Rudder), 10 Hz, from the RF300 above.
+
+**In:** PGN 127250 (Vessel Heading), shown on the heading gauge. The PGN carries
+a flag saying whether the heading is referenced to true or to magnetic north --
+the two differ by the local variation, so the gauge always labels which one it
+is showing rather than leaving it to be assumed. A heading is blanked after 3 s
+of silence from its sender. If two devices send heading, the first one heard
+from keeps the display until it goes quiet.
+
+### Bus status indicator
+
+The header line reports what the device can actually tell about its connection:
+
+| Reading | Meaning |
+| --- | --- |
+| `offline` | The bridge did not start, or the CAN port failed to open |
+| `bus off` | Controller in bus-off; recovery requested |
+| `no response` | Frames go out, nothing acknowledges them -- unplugged drop cable, or no terminator |
+| `claiming address` | Bus is healthy, ISO address claim still in progress |
+| `online (addr N)` | Address claimed, controller error-active |
+
+The error state of the CAN controller is what drives this, rather than waiting
+for received traffic to dry up: a node alone on the wire climbs out of
+error-active within a few transmit attempts, whereas a quiet-but-healthy bus
+may send nothing for a minute between heartbeats. A bad state is held for three
+seconds before a better one is believed, because a disconnected bus cycles
+through bus-off and recovery continuously and would otherwise flicker.
+
+---
+
 ## References
 
 * **Official Wiki:** [Waveshare ESP32-S3-Touch-LCD-4.3 Wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-4.3)

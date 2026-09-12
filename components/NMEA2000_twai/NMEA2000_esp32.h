@@ -36,6 +36,29 @@ public:
 
     void SetCANBufferSize(uint16_t RxBufferSize, uint16_t TxBufferSize);
 
+    /**
+     * Controller-level view of the bus, for status reporting.
+     *
+     * The error state is the most useful part: a node alone on the wire (nothing
+     * to acknowledge its frames, or a broken/unterminated bus) climbs out of
+     * error-active within a few transmit attempts, long before the error
+     * counters would reach bus-off. That makes it a far quicker "is anybody
+     * there" indication than waiting for received traffic to dry up.
+     */
+    struct BusHealth {
+        bool open;                    /* CAN port is initialised and enabled */
+        bool bus_off;                 /* Latched by the state-change callback */
+        twai_error_state_t error_state;
+        uint16_t tx_error_count;
+        uint16_t rx_error_count;
+    };
+
+    /**
+     * Sample the controller state. Returns false (with @p out zeroed apart from
+     * the flags it can fill) when the port is not open.
+     */
+    bool GetBusHealth(BusHealth &out);
+
 protected:
     bool CANSendFrame(unsigned long id, unsigned char len, const unsigned char *buf, bool wait_sent) override;
 

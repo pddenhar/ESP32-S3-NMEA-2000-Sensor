@@ -1,6 +1,7 @@
 idf_component_register(SRCS "main.c"
                             "ui/ui_main.c"
                             "ui/ui_rudder_gauge.c"
+                            "ui/ui_heading_gauge.c"
                             "sensors/rudder_sensor.c"
                             "n2k/n2k_bridge.cpp"
                     INCLUDE_DIRS "." "ui" "sensors" "n2k"

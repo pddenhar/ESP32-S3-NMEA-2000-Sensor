@@ -75,6 +75,32 @@ void tNMEA2000_esp32::SetCANBufferSize(uint16_t RxBufferSize, uint16_t TxBufferS
     node_config_.tx_queue_depth = (TxBufferSize > kTxSlotCount) ? kTxSlotCount : TxBufferSize;
 }
 
+bool tNMEA2000_esp32::GetBusHealth(BusHealth &out)
+{
+    out.open = false;
+    out.bus_off = bus_off_;
+    out.error_state = bus_off_ ? TWAI_ERROR_BUS_OFF : TWAI_ERROR_ACTIVE;
+    out.tx_error_count = 0;
+    out.rx_error_count = 0;
+
+    twai_node_status_t status;
+    xSemaphoreTake(can_mutex_, portMAX_DELAY);
+    esp_err_t err = (is_open_ && node_ != nullptr)
+                        ? twai_node_get_info(node_, &status, nullptr)
+                        : ESP_ERR_INVALID_STATE;
+    xSemaphoreGive(can_mutex_);
+
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    out.open = true;
+    out.error_state = status.state;
+    out.tx_error_count = status.tx_error_count;
+    out.rx_error_count = status.rx_error_count;
+    return true;
+}
+
 void tNMEA2000_esp32::InitCANFrameBuffers()
 {
     // Set default buffer sizes if not set by user

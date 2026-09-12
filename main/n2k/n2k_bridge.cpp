@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -24,6 +25,20 @@ static const char *TAG = "n2k";
 
 /* PGN 127245 is normally transmitted at 10 Hz. */
 #define N2K_RUDDER_PERIOD_MS 100
+
+/* PGN 127250 is normally transmitted at 10 Hz, so three seconds of silence
+ * means the compass has stopped rather than that we missed a message. */
+#define N2K_HEADING_TIMEOUT_MS 3000
+
+/* How often the controller is polled for its error state. The state changes
+ * over several frame times, so there is nothing to gain from polling faster,
+ * and each poll takes the driver's mutex. */
+#define N2K_STATUS_PERIOD_MS 200
+
+/* How long a bad bus state is held before a better one is believed. Long
+ * enough to cover a bus-off recovery cycle, short enough that plugging the
+ * drop cable back in shows up while the hand is still on the connector. */
+#define N2K_STATUS_HOLD_MS 3000
 
 /* The stack has to be serviced far more often than the transmit period so
  * address claims and ISO requests are answered promptly. */
@@ -49,13 +64,34 @@ static const char *TAG = "n2k";
 #define N2K_PRODUCT_CODE 100
 #define N2K_PREFERRED_ADDRESS 25
 
-/* Declaring what we transmit lets other devices discover this node's output
- * without having to observe traffic. */
+/* Declaring what we transmit and receive lets other devices discover this
+ * node's interface without having to observe traffic. */
 static const unsigned long kTransmitMessages[] = {127245UL, 0};
+static const unsigned long kReceiveMessages[] = {127250UL, 0};
 
-static tNMEA2000_esp32 s_nmea2000(N2K_CAN_TX_GPIO, N2K_CAN_RX_GPIO);
+/* The library keeps the address-claim state protected, since it is only
+ * meaningful to the code servicing the stack. This node does service the stack,
+ * so it exposes the one query it needs rather than guessing from the source
+ * address (which has a valid-looking value throughout the claim). */
+class tN2kBridgeDevice : public tNMEA2000_esp32 {
+public:
+    using tNMEA2000_esp32::tNMEA2000_esp32;
+
+    /* Mutates claim state on timeout, so it must only be called from the task
+     * that calls ParseMessages(). */
+    bool AddressClaimInProgress() { return IsAddressClaimStarted(0); }
+};
+
+static tN2kBridgeDevice s_nmea2000(N2K_CAN_TX_GPIO, N2K_CAN_RX_GPIO);
 static volatile bool s_running = false;
 static char s_serial[16];
+
+/* Shared with the UI task. Written only by the N2K task; the spinlock keeps a
+ * reader from seeing half of an update. Both structs are small enough that
+ * copying them under the lock costs less than any double-buffering scheme. */
+static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static n2k_heading_t s_heading;
+static n2k_bridge_status_t s_status;
 
 /* A NAME that collides with another node's breaks address claiming, so the
  * unique number is derived from the factory MAC rather than hardcoded. */
@@ -70,15 +106,156 @@ static unsigned long unique_number_from_mac(void)
     return id & 0x1FFFFFUL;
 }
 
+/* Called from ParseMessages() for every message that arrives, in the N2K task. */
+static void handle_heading(const tN2kMsg &msg)
+{
+    unsigned char sid = 0;
+    double heading_rad = N2kDoubleNA;
+    double deviation_rad = N2kDoubleNA;
+    double variation_rad = N2kDoubleNA;
+    tN2kHeadingReference ref = N2khr_Unavailable;
+
+    if (!ParseN2kHeading(msg, sid, heading_rad, deviation_rad, variation_rad, ref)) {
+        return;
+    }
+
+    /* A compass that is powered but not yet settled sends the PGN with the
+     * heading marked not available, and some send it with the reference field
+     * unset. Neither is something to display, but both are normal traffic --
+     * the reading simply goes stale and the gauge blanks. */
+    if (N2kIsNA(heading_rad) || (ref != N2khr_true && ref != N2khr_magnetic)) {
+        return;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+
+    /* A boat can easily carry two heading sources (a fluxgate on the autopilot
+     * and a satellite compass, say). Stay with whichever one was heard from
+     * first and only change over once it has gone quiet, rather than letting
+     * the readout alternate between two devices that disagree by a degree or
+     * two. Safe to read unlocked: only this task writes s_heading. */
+    if (s_heading.valid && s_heading.source_address != msg.Source &&
+        (now_us - s_heading.timestamp_us) < (int64_t)N2K_HEADING_TIMEOUT_MS * 1000) {
+        return;
+    }
+
+    double heading_deg = RadToDeg(heading_rad);
+    /* Wrapped rather than clamped: a sender is free to use a full-circle value
+     * just outside 0..2pi, and a heading is modular anyway. */
+    heading_deg = std::fmod(heading_deg, 360.0);
+    if (heading_deg < 0.0) {
+        heading_deg += 360.0;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    s_heading.valid = true;
+    s_heading.heading_deg = (float)heading_deg;
+    s_heading.reference = (ref == N2khr_magnetic) ? N2K_HEADING_REF_MAGNETIC : N2K_HEADING_REF_TRUE;
+    s_heading.source_address = msg.Source;
+    s_heading.timestamp_us = now_us;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+static void n2k_msg_handler(const tN2kMsg &msg)
+{
+    /* Every decoded message counts as proof of life on the bus, including the
+     * address claims and heartbeats of devices whose data we ignore. */
+    const int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_state_lock);
+    s_status.rx_msg_count++;
+    s_status.last_rx_us = now_us;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    switch (msg.PGN) {
+    case 127250UL:
+        handle_heading(msg);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Runs in the N2K task: AddressClaimInProgress() touches stack state. */
+static void status_update(void)
+{
+    tN2kBridgeDevice::BusHealth health;
+    const bool have_health = s_nmea2000.GetBusHealth(health);
+    /* Asked before the state is decided so the claim timer keeps being
+     * serviced even while the bus is faulty. */
+    const bool claiming = s_nmea2000.AddressClaimInProgress();
+
+    n2k_bus_state_t state;
+    if (!s_running || !have_health) {
+        state = N2K_BUS_STOPPED;
+    } else if (health.bus_off || health.error_state == TWAI_ERROR_BUS_OFF) {
+        state = N2K_BUS_OFF;
+    } else if (health.error_state == TWAI_ERROR_PASSIVE) {
+        /* Error-passive with a transmitting node almost always means nothing is
+         * acknowledging our frames: no other device, or a wiring/termination
+         * fault. Error-warning is left alone, since a busy bus touches it
+         * transiently. */
+        state = N2K_BUS_ERROR;
+    } else if (claiming) {
+        state = N2K_BUS_CLAIMING;
+    } else {
+        state = N2K_BUS_ONLINE;
+    }
+
+    /* A disconnected bus does not settle on one state: the controller reaches
+     * bus-off, recovers, comes back error-active with the counters cleared, and
+     * climbs out again within a second or two. Reporting each step verbatim
+     * makes the indicator flicker between three readings while the fault is
+     * unchanged, so the worst state seen recently is what gets published. The
+     * enum is ordered worst-first, which is what makes the comparison work. */
+    static n2k_bus_state_t held_state = N2K_BUS_ONLINE;
+    static int64_t hold_until_us = 0;
+
+    const int64_t now_us = esp_timer_get_time();
+    if (state <= held_state || now_us >= hold_until_us) {
+        held_state = state;
+        hold_until_us = now_us + (int64_t)N2K_STATUS_HOLD_MS * 1000;
+    } else {
+        state = held_state;
+    }
+
+    const uint8_t address = s_nmea2000.GetN2kSource();
+
+    n2k_bridge_status_t published;
+    portENTER_CRITICAL(&s_state_lock);
+    s_status.state = state;
+    s_status.address = address;
+    s_status.tx_error_count = health.tx_error_count;
+    s_status.rx_error_count = health.rx_error_count;
+    published = s_status;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    static n2k_bus_state_t logged_state = N2K_BUS_STOPPED;
+    static bool logged_once = false;
+    if (!logged_once || published.state != logged_state) {
+        logged_once = true;
+        logged_state = published.state;
+        ESP_LOGI(TAG, "Bus %s: address %u, TEC %u, REC %u, %lu messages received",
+                 n2k_bus_state_str(published.state), (unsigned)published.address,
+                 (unsigned)published.tx_error_count, (unsigned)published.rx_error_count,
+                 (unsigned long)published.rx_msg_count);
+    }
+}
+
 static void n2k_task(void *arg)
 {
     (void)arg;
 
     TickType_t last_send = xTaskGetTickCount();
+    TickType_t last_status = last_send;
 
     for (;;) {
         /* Runs address claiming and answers ISO requests. Must be called often. */
         s_nmea2000.ParseMessages();
+
+        if ((xTaskGetTickCount() - last_status) >= pdMS_TO_TICKS(N2K_STATUS_PERIOD_MS)) {
+            last_status = xTaskGetTickCount();
+            status_update();
+        }
 
         if ((xTaskGetTickCount() - last_send) >= pdMS_TO_TICKS(N2K_RUDDER_PERIOD_MS)) {
             last_send += pdMS_TO_TICKS(N2K_RUDDER_PERIOD_MS);
@@ -127,6 +304,12 @@ extern "C" esp_err_t n2k_bridge_start(void)
     s_nmea2000.SetMode(tNMEA2000::N2km_NodeOnly, N2K_PREFERRED_ADDRESS);
     s_nmea2000.EnableForward(false);
     s_nmea2000.ExtendTransmitMessages(kTransmitMessages);
+    s_nmea2000.ExtendReceiveMessages(kReceiveMessages);
+
+    /* Node-only mode does not forward traffic anywhere, but received messages
+     * still reach this handler -- that is how the bus data shown on screen and
+     * the proof-of-life for the status indicator arrive. */
+    s_nmea2000.SetMsgHandler(n2k_msg_handler);
 
     if (!s_nmea2000.Open()) {
         ESP_LOGE(TAG, "Failed to open CAN port on TX=GPIO%d RX=GPIO%d",
@@ -149,4 +332,46 @@ extern "C" esp_err_t n2k_bridge_start(void)
 extern "C" bool n2k_bridge_is_running(void)
 {
     return s_running;
+}
+
+extern "C" esp_err_t n2k_bridge_read_heading(n2k_heading_t *out)
+{
+    if (out == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    *out = s_heading;
+    portEXIT_CRITICAL(&s_state_lock);
+
+    /* Aged out here rather than in the receive path so that a compass that
+     * stops sending blanks the reading without needing anything to run. */
+    if (out->valid &&
+        (esp_timer_get_time() - out->timestamp_us) > (int64_t)N2K_HEADING_TIMEOUT_MS * 1000) {
+        out->valid = false;
+    }
+    return ESP_OK;
+}
+
+extern "C" void n2k_bridge_get_status(n2k_bridge_status_t *out)
+{
+    if (out == nullptr) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    *out = s_status;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+extern "C" const char *n2k_bus_state_str(n2k_bus_state_t state)
+{
+    switch (state) {
+    case N2K_BUS_STOPPED:  return "stopped";
+    case N2K_BUS_OFF:      return "bus off";
+    case N2K_BUS_ERROR:    return "no response";
+    case N2K_BUS_CLAIMING: return "claiming";
+    case N2K_BUS_ONLINE:   return "online";
+    }
+    return "unknown";
 }
